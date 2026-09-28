@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MedSafe - Emergency Medical Identity</title>
+
+<script>
+/* Built-in browser mode: works with no setup. If a real Firebase config is pasted below, the Firebase script overrides this. */
+(function(){
+  var U="medsafe_users",S="medsafe_session",ls=[],cur=null;
+  function rd(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}}
+  function wr(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){throw new Error("This browser is blocking local storage.")}}
+  function hash(t){
+    if(!(window.crypto&&crypto.subtle))return Promise.resolve("x"+t);
+    return crypto.subtle.digest("SHA-256",new TextEncoder().encode("medsafe:"+t)).then(function(b){return Array.from(new Uint8Array(b)).map(function(x){return x.toString(16).padStart(2,"0")}).join("")});
+  }
+  function sess(){var id=rd(S,null);if(!id)return null;var u=rd(U,{})[id];return u?{uid:id,email:u.email,displayName:u.name}:null}
+  function emit(){cur=sess();ls.forEach(function(f){f(cur)})}
+  function pk(){if(!cur)throw new Error("Please sign in first.");return "medsafe_profiles_"+cur.uid}
+  window.medsafeDemoMode=true;
+  window.firebaseReady=function(){return true};
+  window.firebaseCurrentUser=function(){return cur};
+  window.firebaseWatchAuth=function(cb){ls.push(cb);cur=sess();cb(cur);return function(){}};
+  window.firebaseRegisterEmail=async function(name,email,pw){
+    var users=rd(U,{}),id=email.toLowerCase();
+    if(users[id])throw new Error("This email is already registered on this device. Please sign in.");
+    users[id]={email:email,name:name,pw:await hash(pw)};wr(U,users);wr(S,id);emit();
+  };
+  window.firebaseSignInEmail=async function(email,pw){
+    var id=email.toLowerCase(),u=rd(U,{})[id];
+    if(!u||u.pw!==await hash(pw))throw new Error("Incorrect email or password.");
+    wr(S,id);emit();
+  };
+  window.firebaseResetPassword=async function(){throw new Error("Email password reset needs the Firebase cloud version. In demo mode, create a new account with another email.")};
+  window.firebaseLogout=async function(){try{localStorage.removeItem(S)}catch(e){}emit()};
+  window.firebaseLoadProfiles=async function(){return rd(pk(),[])};
+  window.firebaseAddProfile=async function(p){var k=pk(),a=rd(k,[]),n=Object.assign({},p,{firestoreId:"p"+Date.now().toString(36)+Math.random().toString(36).slice(2,6)});a.push(n);wr(k,a);return n};
+  window.firebaseUpdateProfile=async function(id,p){var k=pk();wr(k,rd(k,[]).map(function(x){return x.firestoreId===id?Object.assign({},x,p):x}))};
+  window.firebaseDeleteProfile=async function(id){var k=pk();wr(k,rd(k,[]).filter(function(x){return x.firestoreId!==id}))};
+})();
+</script>
+
+<!-- Firebase Authentication + Firestore -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import {
+    getAuth,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    sendPasswordResetEmail,
+    onAuthStateChanged,
+    signOut,
+    updateProfile
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import {
+    getFirestore,
+    collection,
+    getDocs,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    doc,
+    query,
+    orderBy
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+  // ============================================================
+  // 1) PASTE YOUR FIREBASE WEB APP CONFIG HERE
+  // Firebase Console -> Project settings -> Your apps -> Web app
+  // ============================================================
+  // IMPORTANT:
+  // Replace ONLY the values below with the Web App config from:
+  // Firebase Console -> Project settings -> Your apps -> Web app
+  //
+  // Do NOT put a service-account private key here.
+  const firebaseConfig = {
+    apiKey: "PASTE_YOUR_API_KEY",
+    authDomain: "PASTE_YOUR_PROJECT_ID.firebaseapp.com",
+    projectId: "PASTE_YOUR_PROJECT_ID",
+    storageBucket: "PASTE_YOUR_PROJECT_ID.firebasestorage.app",
+    messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID",
+    appId: "PASTE_YOUR_APP_ID"
+  };
+
+  let firebaseReady = false;
+  let auth = null;
+  let db = null;
+
+  try {
+    if (!firebaseConfig.apiKey.startsWith("PASTE_") &&
+        !firebaseConfig.projectId.startsWith("PASTE_")) {
+      const app = initializeApp(firebaseConfig);
+      auth = getAuth(app);
+      db = getFirestore(app);
+firebaseReady = true;
+    }
+  } catch (error) {
+    console.error("Firebase initialization failed:", error);
+  }
+
+  if (firebaseReady) {
+  window.medsafeDemoMode = false;
+  window.firebaseReady = () => firebaseReady;
+
+  window.firebaseSignInEmail = async function (email, password) {
+    if (!firebaseReady) throw new Error("Firebase is not configured yet.");
+    await signInWithEmailAndPassword(auth, email, password);
+  };
+
+  window.firebaseRegisterEmail = async function (name, email, password) {
+    if (!firebaseReady) throw new Error("Firebase is not configured yet.");
+    const result = await createUserWithEmailAndPassword(auth, email, password);
+    if (name) await updateProfile(result.user, { displayName: name });
+  };
+
+  window.firebaseResetPassword = async function (email) {
+    if (!firebaseReady) throw new Error("Firebase is not configured yet.");
+    await sendPasswordResetEmail(auth, email);
+  };
+
+  window.firebaseLogout = async function () {
+    if (auth) await signOut(auth);
+  };
+
+  window.firebaseCurrentUser = () => auth?.currentUser || null;
+
+  async function getUserProfiles(uid) {
+    const ref = collection(db, "users", uid, "profiles");
+    const q = query(ref, orderBy("createdAt", "asc"));
+    const snap = await getDocs(q);
+    return snap.docs.map(d => ({ ...d.data(), firestoreId: d.id }));
+  }
+
+  window.firebaseLoadProfiles = async function () {
+    const user = auth?.currentUser;
+    if (!user) return [];
+    return await getUserProfiles(user.uid);
+  };
+
+  window.firebaseAddProfile = async function (profile) {
+    const user = auth?.currentUser;
+    if (!user) throw new Error("Please sign in first.");
+    const ref = collection(db, "users", user.uid, "profiles");
+    const docRef = await addDoc(ref, profile);
+    return { ...profile, firestoreId: docRef.id };
+  };
+
+  window.firebaseUpdateProfile = async function (profileId, profile) {
+    const user = auth?.currentUser;
+    if (!user) throw new Error("Please sign in first.");
+    await updateDoc(doc(db, "users", user.uid, "profiles", profileId), profile);
+  };
+
+  window.firebaseDeleteProfile = async function (profileId) {
+    const user = auth?.currentUser;
+    if (!user) throw new Error("Please sign in first.");
+    await deleteDoc(doc(db, "users", user.uid, "profiles", profileId));
+  };
+
+  if (firebaseReady) {
+    window.firebaseWatchAuth = function(callback){
+      return onAuthStateChanged(auth, callback);
+    };
+  }
+  } // end firebaseReady
+</script>
+
+<!-- QRCode.js: used only to draw each user's individual QR code -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;
+  font-family:Arial,Helvetica,sans-serif;
+  background:#eaf7f5;
+  color:#173b4d;
+}
+header{
+  background:#0b7285;
+  color:white;
+  padding:18px 7%;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:20px;
+  position:sticky;
+  top:0;
+  z-index:10;
+  box-shadow:0 3px 12px #0002;
+}
+.logo{font-size:24px;font-weight:800}
+nav{display:flex;gap:18px;flex-wrap:wrap}
+nav a{color:white;text-decoration:none;font-weight:700;cursor:pointer}
+.hero{
+  padding:65px 7%;
+  background:linear-gradient(135deg,#dff8f4,#f4fbff);
+  text-align:center;
+}
+.hero h1{font-size:42px;margin:0 0 12px;color:#075e70}
+.hero p{font-size:18px;max-width:800px;margin:0 auto 25px;line-height:1.6}
+.btn{
+  border:0;border-radius:10px;padding:12px 18px;
+  background:#0b7285;color:white;font-weight:700;cursor:pointer;
+}
+.btn:hover{background:#095d6d}
+.btn.secondary{background:#3b7a57}
+.btn.danger{background:#c94c4c}
+.btn.light{background:#e6f4f7;color:#075e70}
+.container{width:86%;max-width:1200px;margin:35px auto}
+.card{
+  background:white;border-radius:16px;padding:25px;margin-bottom:25px;
+  box-shadow:0 5px 22px #164e5d18;
+  border:1px solid #cce9e7;
+}
+h2{color:#075e70}
+.form-grid{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px
+}
+label{font-weight:700;display:block;margin-bottom:7px}
+input,textarea{
+  width:100%;padding:12px;border:1px solid #b8d9d8;border-radius:9px;
+  font-size:15px;background:#fbffff
+}
+textarea{min-height:90px;resize:vertical}
+.full{grid-column:1/-1}
+.required{color:#c94c4c}
+.message{
+  display:none;padding:14px 16px;border-radius:10px;margin-top:15px;font-weight:700
+}
+.message.success{display:block;background:#dff6e7;color:#17663a;border:1px solid #a9ddbd}
+.message.error{display:block;background:#fde7e7;color:#9d2525;border:1px solid #efb2b2}
+.profile-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+.profile{
+  border:1px solid #c8e5e3;border-radius:14px;padding:18px;background:#f9ffff
+}
+.profile h3{margin:0 0 8px;color:#075e70}
+.profile p{margin:6px 0;line-height:1.4}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.qrbox{
+  display:none;
+  margin-top:16px;
+  padding:16px;
+  background:white;
+  border:2px dashed #65aeb0;
+  border-radius:12px;
+  text-align:center;
+}
+.qrbox canvas,.qrbox img{margin:auto;display:block}
+.qr-title{font-weight:800;color:#075e70;margin-bottom:10px}
+.count{
+  display:inline-block;background:#0b7285;color:white;
+  padding:6px 10px;border-radius:20px;font-weight:700
+}
+.empty{
+  text-align:center;padding:25px;background:#f3fbfb;
+  border-radius:12px;color:#58727a
+}
+.medical-card{
+  border:2px solid #0b7285;
+  border-radius:18px;
+  padding:25px;
+  background:#faffff;
+}
+.medical-card .alert{
+  background:#fff0f0;border-left:5px solid #c94c4c;
+  padding:12px;margin:12px 0;border-radius:5px
+}
+.detail{margin:10px 0}
+.detail strong{color:#075e70}
+footer{text-align:center;padding:30px;color:#52717a}
+.small{font-size:13px;color:#607d86}
+.recent-item{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid #d7ecea}
+.recent-item:last-child{border-bottom:0}
+@media(max-width:750px){
+  header{flex-direction:column;align-items:flex-start}
+  .hero h1{font-size:31px}
+  .form-grid{grid-template-columns:1fr}
+  .full{grid-column:auto}
+  .container{width:92%}
+}
+
+/* ===== Animated Project Introduction ===== */
+#introScreen{
+  position:fixed;
+  inset:0;
+  z-index:9999;
+  overflow:hidden;
+  background:linear-gradient(135deg,#063b4a,#075e70 48%,#0b7285);
+  color:white;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  transition:opacity .9s ease, visibility .9s ease;
+}
+#introScreen.hide{
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+}
+.intro-bg{
+  position:absolute;
+  inset:0;
+  overflow:hidden;
+}
+.intro-orb{
+  position:absolute;
+  border-radius:50%;
+  filter:blur(2px);
+  opacity:.18;
+  animation:floatOrb 7s ease-in-out infinite alternate;
+}
+.intro-orb.one{width:330px;height:330px;background:#76e4d2;top:-90px;left:-80px}
+.intro-orb.two{width:420px;height:420px;background:#8fd8ff;right:-150px;bottom:-160px;animation-delay:1.2s}
+.intro-orb.three{width:180px;height:180px;background:#fff;right:18%;top:12%;animation-delay:2s}
+@keyframes floatOrb{
+  from{transform:translate(0,0) scale(1)}
+  to{transform:translate(35px,25px) scale(1.12)}
+}
+.intro-content{
+  position:relative;
+  width:min(900px,90%);
+  text-align:center;
+  animation:introEnter 1.2s ease both;
+}
+@keyframes introEnter{
+  from{opacity:0;transform:translateY(35px) scale(.96)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+.intro-logo{
+  width:88px;height:88px;margin:0 auto 18px;
+  border-radius:50%;
+  background:#ffffff18;
+  border:2px solid #ffffff66;
+  display:flex;align-items:center;justify-content:center;
+  font-size:43px;
+  box-shadow:0 0 35px #ffffff22;
+  animation:pulseIntro 2s infinite;
+}
+@keyframes pulseIntro{
+  0%,100%{box-shadow:0 0 0 0 #8fe9dd33}
+  50%{box-shadow:0 0 0 16px #8fe9dd00}
+}
+.intro-kicker{
+  letter-spacing:4px;
+  font-size:13px;
+  font-weight:800;
+  opacity:.82;
+  margin-bottom:12px;
+}
+.intro-title{
+  font-size:clamp(31px,5vw,58px);
+  line-height:1.08;
+  margin:0 auto 15px;
+  font-weight:900;
+}
+.intro-title span{
+  color:#a9f4e9;
+}
+.intro-tagline{
+  font-size:clamp(17px,2vw,22px);
+  margin:0 auto 26px;
+  opacity:.92;
+}
+.intro-info{
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:12px;
+  margin:0 auto 28px;
+}
+.intro-info div{
+  padding:15px 10px;
+  border:1px solid #ffffff35;
+  background:#ffffff10;
+  border-radius:13px;
+  backdrop-filter:blur(5px);
+  animation:cardRise .8s ease both;
+}
+.intro-info div:nth-child(2){animation-delay:.12s}
+.intro-info div:nth-child(3){animation-delay:.24s}
+.intro-info div:nth-child(4){animation-delay:.36s}
+@keyframes cardRise{
+  from{opacity:0;transform:translateY(18px)}
+  to{opacity:1;transform:translateY(0)}
+}
+.intro-info strong{display:block;font-size:21px;margin-bottom:4px}
+.intro-info small{opacity:.78}
+.intro-description{
+  max-width:730px;
+  margin:0 auto 25px;
+  line-height:1.6;
+  color:#e6ffff;
+}
+.intro-start{
+  background:white;
+  color:#075e70;
+  border:0;
+  border-radius:30px;
+  padding:14px 30px;
+  font-size:16px;
+  font-weight:800;
+  cursor:pointer;
+  box-shadow:0 8px 25px #0003;
+  transition:transform .2s,box-shadow .2s;
+}
+.intro-start:hover{
+  transform:translateY(-3px);
+  box-shadow:0 12px 30px #0004;
+}
+.intro-skip{
+  display:block;
+  margin:13px auto 0;
+  background:none;
+  border:0;
+  color:#ffffffaa;
+  cursor:pointer;
+  font-size:13px;
+}
+
+.intro-choice-buttons{
+  display:flex;
+  justify-content:center;
+  gap:14px;
+  flex-wrap:wrap;
+  margin-top:8px;
+}
+.intro-check{
+  background:#ffffff18;
+  color:white;
+  border:1px solid #ffffff66;
+  border-radius:30px;
+  padding:14px 30px;
+  font-size:16px;
+  font-weight:800;
+  cursor:pointer;
+  transition:transform .2s,background .2s;
+}
+.intro-check:hover{
+  transform:translateY(-3px);
+  background:#ffffff28;
+}
+.login-panel{
+  display:none;
+  position:fixed;
+  inset:0;
+  z-index:10001;
+  background:#002f3dcc;
+  align-items:center;
+  justify-content:center;
+  padding:20px;
+}
+.login-panel.show{display:flex}
+.login-box{
+  position:relative;
+  width:min(420px,100%);
+  background:white;
+  color:#173b4d;
+  border-radius:20px;
+  padding:30px;
+  text-align:left;
+  box-shadow:0 20px 60px #0005;
+  animation:loginPop .3s ease;
+}
+@keyframes loginPop{
+  from{opacity:0;transform:scale(.9) translateY(15px)}
+  to{opacity:1;transform:scale(1) translateY(0)}
+}
+.login-box h2{
+  margin:5px 0 8px;
+  text-align:center;
+}
+.login-box>p{
+  text-align:center;
+  color:#607d86;
+}
+.login-icon{
+  text-align:center;
+  font-size:38px;
+}
+.login-box label{
+  display:block;
+  margin-top:15px;
+}
+.login-box input{
+  margin-top:6px;
+}
+.login-submit{
+  width:100%;
+  margin-top:20px;
+  padding:13px;
+  border:0;
+  border-radius:10px;
+  background:#0b7285;
+  color:white;
+  font-weight:800;
+  font-size:15px;
+  cursor:pointer;
+}
+.login-submit:hover{background:#095d6d}
+.login-close{
+  position:absolute;
+  right:15px;
+  top:10px;
+  border:0;
+  background:none;
+  font-size:28px;
+  color:#66808a;
+  cursor:pointer;
+}
+.login-message{
+  min-height:20px;
+  font-weight:700;
+}
+.demo-note{
+  font-size:12px !important;
+  margin-top:12px !important;
+}
+
+@media(max-width:700px){
+  .intro-info{grid-template-columns:repeat(2,1fr)}
+  .intro-content{padding:20px 0}
+}
+
+.forgot-btn{border:0;background:transparent;color:#0b7285;font-size:13px;font-weight:700;cursor:pointer;margin-top:8px}
+.auth-switch{text-align:center;font-size:13px;color:#617984;margin-top:16px}
+.auth-switch button{border:0;background:transparent;color:#0b7285;font-weight:800;cursor:pointer}
+.account-area{display:flex;align-items:center;gap:10px}
+body:not(.authenticated) #profilesList{display:none} body:not(.authenticated) #profileCount{opacity:.45}
+.account-email{font-size:12px;opacity:.9}
+.logout-btn{border:1px solid #ffffff55;background:#ffffff18;color:#fff;border-radius:9px;padding:8px 12px;cursor:pointer;font-weight:700}
+.auth-required{
+  margin:18px auto;padding:18px;max-width:760px;border-radius:14px;
+  background:#fff;border:1px solid #cfe5e8;text-align:center;
+}
+
+</style>
+</head>
+
+<body>
+
+<!-- ===== Animated Project Introduction ===== -->
+<!-- Login required before accessing MedSafe -->
+<div id="introScreen">
+  <div class="intro-bg">
+    <div class="intro-orb one"></div>
+    <div class="intro-orb two"></div>
+    <div class="intro-orb three"></div>
+  </div>
+
+  <div class="intro-content">
+    <div class="intro-logo">🩺</div>
+    <div class="intro-kicker">13P • MEDICAL PROFILE</div>
+    <h1 class="intro-title">
+      Emergency-First <span>Medical Identity</span><br>
+      & Medication Continuity System
+    </h1>
+    <p class="intro-tagline">Secure. Instant. Life-Saving.</p>
+
+    <div class="intro-info">
+      <div><strong>QR</strong><small>Quick Emergency Access</small></div>
+      <div><strong>AI</strong><small>Assisted Support</small></div>
+      <div><strong>🔐</strong><small>Controlled Access</small></div>
+      <div><strong>📱</strong><small>Web / Mobile</small></div>
+    </div>
+
+    <p class="intro-description">
+      A digital medical identity system designed to make essential emergency
+      information easier to access — including allergies, medications,
+      emergency contacts and medical alerts.
+    </p>
+
+    <div class="intro-choice-buttons">
+      <button class="intro-start" onclick="openLogin()">🔐 Sign In to MedSafe</button>
+</div>
+<!-- Real Firebase authentication -->
+    <div id="loginPanel" class="login-panel">
+      <div class="login-box auth-box">
+<div class="login-icon">🔐</div>
+        <h2 id="authTitle">Sign in to MedSafe</h2>
+        <p id="authSubtitle">Use your email and password to access your secure MedSafe dashboard.</p>
+<div id="registerNameWrap" style="display:none">
+          <label>Full Name</label>
+          <input id="authName" type="text" placeholder="Enter your full name">
+        </div>
+
+        <label>Email</label>
+        <input id="authEmail" type="email" placeholder="you@example.com" autocomplete="email">
+
+        <label>Password</label>
+        <input id="authPassword" type="password" placeholder="Enter your password" autocomplete="current-password">
+
+        <div id="confirmPasswordWrap" style="display:none">
+          <label>Confirm Password</label>
+          <input id="authConfirmPassword" type="password" placeholder="Re-enter your password" autocomplete="new-password">
+        </div>
+
+        <button class="login-submit" id="authSubmit" onclick="submitEmailAuth()">Sign In →</button>
+        <button class="forgot-btn" id="forgotBtn" onclick="forgotPassword()">Forgot password?</button>
+
+        <p id="loginMessage" class="login-message"></p>
+        <p class="small" id="modeNote"></p>
+
+        <p class="auth-switch">
+          <span id="authSwitchText">New to MedSafe?</span>
+          <button type="button" onclick="toggleAuthMode()" id="authSwitchBtn">Create an account</button>
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<header>
+  <div class="logo">🩺 MedSafe</div>
+  <nav>
+    <a onclick="scrollToId('home')">Home</a>
+    <a onclick="scrollToId('recent')">Recent</a>
+    <a onclick="scrollToId('create')">Create Profile</a>
+    <a onclick="scrollToId('profiles')">Saved Users</a>
+    <a onclick="scrollToId('cardSection')">Medical Card</a>
+  </nav>
+
+  <div class="account-area">
+    <span id="accountLabel" class="account-email">Not signed in</span>
+    <button class="logout-btn" onclick="logoutMedSafe()">Sign Out</button>
+  </div>
+</header>
+
+<section class="hero" id="home">
+  <h1>Emergency-First Medical Identity</h1>
+  <p>Secure. Instant. Life-Saving. Create individual emergency medical profiles and generate a separate QR code for every user.</p>
+  <button class="btn" onclick="scrollToId('create')">Create New User</button>
+</section>
+
+<div class="container">
+
+<section class="card" id="recent">
+  <h2>🕘 Previously saved &amp; recently edited</h2>
+  <p>Your latest saved and edited profiles appear here. Open, edit or download a QR straight from the homepage.</p>
+  <div id="recentList"><div class="empty">Sign in to see your saved profiles.</div></div>
+</section>
+
+<section class="card" id="create">
+  <h2>➕ Create Medical Profile</h2>
+  <p>Every accepted profile is saved separately and receives its own unique QR code.</p>
+
+  <form id="profileForm" novalidate>
+    <div class="form-grid">
+      <div>
+        <label>Full Name <span class="required">*</span></label>
+        <input id="name" required placeholder="Enter full name">
+      </div>
+
+      <div>
+        <label>Patient ID <span class="required">*</span></label>
+        <input id="patientId" required placeholder="Example: MS1001">
+      </div>
+
+      <div>
+        <label>Blood Group <span class="required">*</span></label>
+        <select id="bloodGroup" required style="width:100%;padding:12px;border:1px solid #b8d9d8;border-radius:9px;font-size:15px;background:#fbffff">
+          <option value="">Select blood group</option>
+          <option>A+</option><option>A-</option>
+          <option>B+</option><option>B-</option>
+          <option>AB+</option><option>AB-</option>
+          <option>O+</option><option>O-</option>
+          <option>Unknown</option>
+        </select>
+      </div>
+
+      <div>
+        <label>Allergies <span class="required">*</span></label>
+        <input id="allergies" required placeholder="Enter allergies or None">
+      </div>
+
+      <div>
+        <label>Current Medications <span class="required">*</span></label>
+        <input id="medications" required placeholder="Enter medications or None">
+      </div>
+
+      <div>
+        <label>Emergency Contact <span class="required">*</span></label>
+        <input id="contact" required placeholder="Name + phone number">
+      </div>
+
+      <div>
+        <label>Medical Alert <span class="required">*</span></label>
+        <input id="alert" required placeholder="Example: Asthma / Diabetes / None">
+      </div>
+
+      <div class="full">
+        <label>Additional Emergency Notes</label>
+        <textarea id="notes" placeholder="Any additional emergency information"></textarea>
+      </div>
+    </div>
+
+    <button class="btn" type="submit" style="margin-top:18px">✓ Accept & Save User</button>
+    <button class="btn light" type="button" onclick="resetForm()" style="margin-top:18px">Clear Form</button>
+    <div id="formMessage" class="message"></div>
+  </form>
+</section>
+
+<section class="card" id="profiles">
+  <h2>👥 Saved Medical Profiles <span class="count" id="profileCount">0</span></h2>
+  <p>Each user below has an independent profile and an independent QR code.</p>
+  <div id="profilesList"></div>
+</section>
+
+<section class="card" id="cardSection">
+  <h2>🪪 Selected Medical Card</h2>
+  <div id="medicalCard" class="empty">Select “View Card” for any saved user.</div>
+</section>
+
+</div>
+
+<footer>
+  MedSafe • Emergency information should always be verified by authorized medical professionals. Prototype: use sample data only.
+</footer>
+
+<script>
+let profiles = [];
+let currentMedSafeUser = null;
+let editingIndex = -1;
+
+function scrollToId(id){
+  document.getElementById(id).scrollIntoView({behavior:"smooth"});
+}
+
+function clean(value){
+  return String(value ?? "").trim();
+}
+
+function escapeHTML(value){
+  return String(value ?? "")
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&#039;");
+}
+
+function showMessage(text,type){
+  const box=document.getElementById("formMessage");
+  box.textContent=text;
+  box.className="message " + type;
+}
+
+function resetForm(){
+  document.getElementById("profileForm").reset();
+  editingIndex=-1;
+  document.querySelector('#profileForm button[type="submit"]').textContent="✓ Accept & Save User";
+  document.getElementById("formMessage").className="message";
+}
+
+function makeUniqueQRId(){
+  return "MS-" + Date.now().toString(36).toUpperCase() + "-" +
+         Math.random().toString(36).slice(2,7).toUpperCase();
+}
+
+function makeQRText(p){
+  var c=function(v,n){v=String(v==null?"":v).replace(/\s+/g," ").trim();return v.length>n?v.slice(0,n-1)+"…":v};
+  var lines=[
+    "MEDSAFE EMERGENCY PROFILE",
+    "Name: "+c(p.name,80),
+    "Patient ID: "+c(p.patientId,30),
+    "Blood group: "+c(p.bloodGroup,10),
+    "Allergies: "+c(p.allergies,150),
+    "Medications: "+c(p.medications,200),
+    "Emergency contact: "+c(p.contact,80),
+    "Medical alert: "+c(p.alert,100)
+  ];
+  if(p.notes) lines.push("Notes: "+c(p.notes,200));
+  lines.push("Verify with a medical professional.");
+  return lines.join("\n");
+}
+
+function createQR(containerId, profile){
+  const box=document.getElementById(containerId);
+  if(!box) return;
+  box.innerHTML = "";
+  if(typeof QRCode === "undefined"){
+    box.innerHTML = "<p style='color:#a33'>QR library could not load. Connect to the internet and refresh the page.</p>";
+    return;
+  }
+  try{
+    box.style.cssText="display:inline-block;background:#fff;padding:16px;border-radius:8px";
+    new QRCode(box,{text:makeQRText(profile),width:260,height:260,correctLevel:QRCode.CorrectLevel.L});
+  }catch(e){
+    box.textContent="QR could not be created: "+(e.message||e);
+  }
+}
+
+function downloadQR(index){
+  const p=profiles[index];
+  if(!p) return;
+  if(typeof QRCode==="undefined"){alert("QR library could not load. Connect to the internet and refresh.");return}
+  const tmp=document.createElement("div");
+  tmp.style.cssText="position:fixed;left:-9999px;top:0";
+  document.body.appendChild(tmp);
+  try{
+    new QRCode(tmp,{text:makeQRText(p),width:400,height:400,correctLevel:QRCode.CorrectLevel.L});
+    const src=tmp.querySelector("canvas"),m=40,c=document.createElement("canvas");
+    c.width=c.height=400+m*2;
+    const x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,c.width,c.height);x.drawImage(src,m,m);
+    const a=document.createElement("a");
+    a.download="MedSafe-QR-"+String(p.patientId).replace(/[^\w-]/g,"_")+".png";
+    a.href=c.toDataURL("image/png");a.click();
+  }catch(e){alert("Could not create the QR image: "+(e.message||e))}
+  tmp.remove();
+}
+
+function fmt(t){try{return new Date(t).toLocaleString([],{dateStyle:"medium",timeStyle:"short"})}catch(e){return ""}}
+function whenText(p){var t="Saved: "+fmt(p.createdAt);if(p.updatedAt)t+=" · Edited: "+fmt(p.updatedAt);return t}
+
+function renderRecent(){
+  const box=document.getElementById("recentList");
+  if(!box) return;
+  if(!profiles.length){box.innerHTML='<div class="empty">Nothing saved yet. Create the first medical profile below.</div>';return}
+  const items=profiles.map((p,i)=>({p,i,t:new Date(p.updatedAt||p.createdAt||0).getTime()})).sort((a,b)=>b.t-a.t).slice(0,6);
+  box.innerHTML=items.map(x=>`
+    <div class="recent-item">
+      <div><strong>${escapeHTML(x.p.name)}</strong> <span class="small">ID ${escapeHTML(x.p.patientId)}</span><br>
+      <span class="small">${x.p.updatedAt?"✏️ Edited "+fmt(x.p.updatedAt)+" · ":""}💾 Saved ${fmt(x.p.createdAt)}</span></div>
+      <div class="actions" style="margin:0">
+        <button class="btn" onclick="viewCard(${x.i})">View</button>
+        <button class="btn light" onclick="editProfile(${x.i})">Edit</button>
+        <button class="btn secondary" onclick="downloadQR(${x.i})">Download QR</button>
+      </div>
+    </div>`).join("");
+}
+
+function toggleQR(index){
+  const box=document.getElementById("qr-" + index);
+  if(!box) return;
+
+  if(box.style.display === "block"){
+    box.style.display="none";
+    return;
+  }
+
+  box.style.display="block";
+  createQR("qr-code-" + index, profiles[index]);
+}
+
+function viewCard(index){
+  const p=profiles[index];
+  if(!p) return;
+
+  document.getElementById("medicalCard").className="medical-card";
+  document.getElementById("medicalCard").innerHTML=`
+    <h3>${escapeHTML(p.name)}</h3>
+    <div class="detail"><strong>Patient ID:</strong> ${escapeHTML(p.patientId)}</div>
+    <div class="detail"><strong>Blood Group:</strong> ${escapeHTML(p.bloodGroup || "Not recorded")}</div>
+    <div class="detail"><strong>Allergies:</strong> ${escapeHTML(p.allergies)}</div>
+    <div class="detail"><strong>Current Medications:</strong> ${escapeHTML(p.medications)}</div>
+    <div class="detail"><strong>Emergency Contact:</strong> ${escapeHTML(p.contact)}</div>
+    <div class="alert"><strong>Medical Alert:</strong> ${escapeHTML(p.alert)}</div>
+    <div class="detail"><strong>Emergency Notes:</strong> ${escapeHTML(p.notes || "None")}</div>
+    <div class="detail"><strong>Individual QR ID:</strong> ${escapeHTML(p.qrId)}</div>
+  `;
+  scrollToId("cardSection");
+}
+
+function editProfile(index){
+  const p=profiles[index];
+  if(!p) return;
+
+  editingIndex=index;
+  document.getElementById("name").value=p.name || "";
+  document.getElementById("patientId").value=p.patientId || "";
+  document.getElementById("bloodGroup").value=p.bloodGroup || "";
+  document.getElementById("allergies").value=p.allergies || "";
+  document.getElementById("medications").value=p.medications || "";
+  document.getElementById("contact").value=p.contact || "";
+  document.getElementById("alert").value=p.alert || "";
+  document.getElementById("notes").value=p.notes || "";
+
+  document.querySelector('#profileForm button[type="submit"]').textContent="✓ Save Edited Profile";
+  showMessage("Editing " + p.name + ". Make your changes and save the profile.","success");
+  scrollToId("create");
+}
+
+async function deleteProfile(index){
+  const p=profiles[index];
+  if(!p) return;
+
+  if(confirm("Delete the profile for " + p.name + "?")){
+    try{
+      await window.firebaseDeleteProfile(p.firestoreId);
+      profiles.splice(index,1);
+      renderProfiles();
+    }catch(error){
+      alert("Could not delete the profile: " + (error.message || error));
+    }
+
+    document.getElementById("medicalCard").className="empty";
+    document.getElementById("medicalCard").textContent="Select “View Card” for any saved user.";
+  }
+}
+
+function renderProfiles(){
+  const list=document.getElementById("profilesList");
+  document.getElementById("profileCount").textContent=profiles.length;
+  renderRecent();
+
+  if(profiles.length===0){
+    list.innerHTML='<div class="empty">No users saved yet. Create the first medical profile above.</div>';
+    return;
+  }
+
+  list.innerHTML=profiles.map((p,index)=>`
+    <div class="profile">
+      <h3>${escapeHTML(p.name)}</h3>
+      <p><strong>Patient ID:</strong> ${escapeHTML(p.patientId)}</p>
+      <p><strong>Blood Group:</strong> ${escapeHTML(p.bloodGroup || "Not recorded")}</p>
+      <p><strong>Allergies:</strong> ${escapeHTML(p.allergies)}</p>
+      <p><strong>Medications:</strong> ${escapeHTML(p.medications)}</p>
+      <p><strong>Emergency Contact:</strong> ${escapeHTML(p.contact)}</p>
+      <p><strong>Medical Alert:</strong> ${escapeHTML(p.alert)}</p>
+      <p class="small"><strong>QR ID:</strong> ${escapeHTML(p.qrId)}</p>
+      <p class="small">${whenText(p)}</p>
+
+      <div class="actions">
+        <button class="btn" onclick="viewCard(${index})">View Card</button>
+<button class="btn light" onclick="editProfile(${index})">Edit</button>
+        <button class="btn secondary" onclick="toggleQR(${index})">Show / Hide QR</button>
+        <button class="btn light" onclick="downloadQR(${index})">Download QR</button>
+        <button class="btn danger" onclick="deleteProfile(${index})">Delete</button>
+      </div>
+
+      <div class="qrbox" id="qr-${index}">
+        <div class="qr-title">Personal QR — ${escapeHTML(p.name)}</div>
+        <div id="qr-code-${index}"></div>
+        <p class="small">Works with any phone camera or QR scanner app. It shows the profile as plain text and needs no internet.</p>
+        <p class="small">QR ID: ${escapeHTML(p.qrId)}</p>
+      </div>
+    </div>
+  `).join("");
+}
+
+document.getElementById("profileForm").addEventListener("submit",async function(event){
+  event.preventDefault();
+
+  if(!window.currentMedSafeUser){
+    showMessage("Please sign in first. Your medical profiles are stored under your secure Firebase account.","error");
+    openLogin();
+    return;
+  }
+
+  const name=clean(document.getElementById("name").value);
+  const patientId=clean(document.getElementById("patientId").value);
+  const bloodGroup=clean(document.getElementById("bloodGroup").value);
+  const allergies=clean(document.getElementById("allergies").value);
+  const medications=clean(document.getElementById("medications").value);
+  const contact=clean(document.getElementById("contact").value);
+  const alert=clean(document.getElementById("alert").value);
+  const notes=clean(document.getElementById("notes").value);
+
+  if(!name || !patientId || !bloodGroup || !allergies || !medications || !contact || !alert){
+    showMessage("Please fill in every required (*) field before saving.","error");
+    return;
+  }
+
+  if(profiles.some((p,i) =>
+    i !== editingIndex &&
+    p.patientId.toLowerCase() === patientId.toLowerCase()
+  )){
+    showMessage("That Patient ID already exists in your account. Please use a unique Patient ID.","error");
+    return;
+  }
+
+  try{
+    if(editingIndex >= 0){
+      const oldProfile=profiles[editingIndex];
+      const updated={
+        ...oldProfile,
+        name,patientId,bloodGroup,allergies,medications,contact,alert,notes,
+        updatedAt:new Date().toISOString()
+      };
+
+      await window.firebaseUpdateProfile(oldProfile.firestoreId, {
+        name,patientId,bloodGroup,allergies,medications,contact,alert,notes,
+        qrId:oldProfile.qrId,
+        createdAt:oldProfile.createdAt || new Date().toISOString(),
+        updatedAt:updated.updatedAt
+      });
+
+      profiles[editingIndex]=updated;
+      renderProfiles();
+
+      const updatedIndex=editingIndex;
+      editingIndex=-1;
+      document.querySelector('#profileForm button[type="submit"]').textContent="✓ Accept & Save User";
+      this.reset();
+
+      showMessage(
+        "✓ " + updated.name +
+        " was updated successfully. Their individual QR code now contains the updated information.",
+        "success"
+      );
+
+      setTimeout(()=>{
+        const box=document.getElementById("qr-" + updatedIndex);
+        if(box){
+          box.style.display="block";
+          createQR("qr-code-" + updatedIndex,profiles[updatedIndex]);
+        }
+        scrollToId("profiles");
+      },100);
+      return;
+    }
+
+    const profile={
+      name,patientId,bloodGroup,allergies,medications,contact,alert,notes,
+      qrId:makeUniqueQRId(),
+      createdAt:new Date().toISOString()
+    };
+
+    const saved=await window.firebaseAddProfile(profile);
+    profiles.push(saved);
+    renderProfiles();
+
+    showMessage(
+      "✓ Profile accepted successfully for " + profile.name +
+      ". A separate QR code has been generated for this user.",
+      "success"
+    );
+
+    this.reset();
+
+    const newIndex=profiles.length-1;
+    setTimeout(()=>{
+      const box=document.getElementById("qr-" + newIndex);
+      if(box){
+        box.style.display="block";
+        createQR("qr-code-" + newIndex,profiles[newIndex]);
+      }
+      scrollToId("profiles");
+    },100);
+
+  }catch(error){
+    console.error(error);
+    showMessage("Could not save the profile: " + (error.message || "Firebase error") + ". Check your Firebase configuration and Firestore rules.","error");
+  }
+});
+renderProfiles();
+
+window.addEventListener("DOMContentLoaded",function(){
+var mn=document.getElementById("modeNote");
+if(mn&&window.medsafeDemoMode)mn.textContent="Demo mode: accounts and profiles are saved in this browser only. Use sample data, not real medical details.";
+if(window.firebaseReady && window.firebaseReady()){
+  window.firebaseWatchAuth(async (user) => {
+    if(user){
+      window.currentMedSafeUser = user;
+      document.body.classList.add("authenticated");
+      if(typeof enterMedSafe==="function")enterMedSafe();
+
+      const label = document.getElementById("accountLabel");
+      if(label) label.textContent = user.displayName || user.email || "Account";
+
+      try{
+        profiles = await window.firebaseLoadProfiles();
+        renderProfiles();
+      }catch(error){
+        console.error(error);
+        showMessage("Signed in, but profiles could not be loaded. Check Firestore setup/rules.","error");
+      }
+    }else{
+      window.currentMedSafeUser = null;
+      document.body.classList.remove("authenticated");
+      profiles = [];
+      renderProfiles();
+
+      const label = document.getElementById("accountLabel");
+      if(label) label.textContent = "Not signed in";
+    }
+  });
+}
+});
+</script>
+
+<script>
+let authMode = "signin";
+
+function enterMedSafe(){
+  const intro=document.getElementById("introScreen");
+  if(!intro) return;
+  intro.classList.add("hide");
+  setTimeout(()=>{ intro.remove(); },950);
+}
+
+function openLogin(){
+  clearTimeout(window.introAutoTimer);
+  document.getElementById("loginPanel").classList.add("show");
+  setAuthMode("signin");
+}
+
+function closeLogin(){
+  document.getElementById("loginPanel").classList.remove("show");
+  document.getElementById("loginMessage").textContent="";
+}
+
+
+function setAuthMessage(text,color="#b52d2d"){
+  const message=document.getElementById("loginMessage");
+  message.textContent=text;
+  message.style.color=color;
+}
+
+function setAuthMode(mode){
+  authMode=mode;
+  const register=mode==="register";
+  document.getElementById("authTitle").textContent=register ? "Create your MedSafe account" : "Sign in to MedSafe";
+  document.getElementById("authSubtitle").textContent=register
+    ? "Create an account with your email and password to securely manage your medical profiles."
+    : "Use your email and password to access your MedSafe dashboard.";
+  document.getElementById("registerNameWrap").style.display=register ? "block" : "none";
+  document.getElementById("confirmPasswordWrap").style.display=register ? "block" : "none";
+  document.getElementById("authSubmit").textContent=register ? "Create Account →" : "Sign In →";
+  document.getElementById("forgotBtn").style.display=register ? "none" : "block";
+  document.getElementById("authSwitchText").textContent=register ? "Already have an account?" : "New to MedSafe?";
+  document.getElementById("authSwitchBtn").textContent=register ? "Sign in" : "Create an account";
+  setAuthMessage("");
+}
+
+function toggleAuthMode(){
+  setAuthMode(authMode==="signin" ? "register" : "signin");
+}
+
+async function submitEmailAuth(){
+  if(!window.firebaseReady()){
+    setAuthMessage("Firebase is not configured yet. Add your Firebase web config in the HTML file first.");
+    return;
+  }
+
+  const name=clean(document.getElementById("authName").value);
+  const email=clean(document.getElementById("authEmail").value);
+  const password=document.getElementById("authPassword").value;
+  const confirm=document.getElementById("authConfirmPassword").value;
+
+  if(!email || !password){
+    setAuthMessage("Please enter your email and password.");
+    return;
+  }
+
+  if(authMode==="register"){
+    if(!name){
+      setAuthMessage("Please enter your full name.");
+      return;
+    }
+    if(password.length < 6){
+      setAuthMessage("Password must be at least 6 characters.");
+      return;
+    }
+    if(password !== confirm){
+      setAuthMessage("Passwords do not match.");
+      return;
+    }
+
+    try{
+      setAuthMessage("Creating your account…","#0b7285");
+      await window.firebaseRegisterEmail(name,email,password);
+      setAuthMessage("✓ Account created successfully.","#197044");
+      setTimeout(()=>{ closeLogin(); enterMedSafe(); },500);
+    }catch(error){
+      console.error(error);
+      setAuthMessage(error.message || "Registration failed.");
+    }
+  }else{
+    try{
+      setAuthMessage("Signing you in…","#0b7285");
+      await window.firebaseSignInEmail(email,password);
+      setAuthMessage("✓ Signed in successfully.","#197044");
+      setTimeout(()=>{ closeLogin(); enterMedSafe(); },500);
+    }catch(error){
+      console.error(error);
+      setAuthMessage(error.message || "Sign-in failed.");
+    }
+  }
+}
+
+async function forgotPassword(){
+  if(!window.firebaseReady()){
+    setAuthMessage("Firebase is not configured yet. Add your Firebase web config first.");
+    return;
+  }
+  const email=clean(document.getElementById("authEmail").value);
+  if(!email){
+    setAuthMessage("Enter your email first, then click Forgot password.");
+    return;
+  }
+  try{
+    await window.firebaseResetPassword(email);
+    setAuthMessage("✓ Password reset email sent. Check your inbox.","#197044");
+  }catch(error){
+    setAuthMessage(error.message || "Could not send the reset email.");
+  }
+}
+
+async function logoutMedSafe(){
+  try{
+    await window.firebaseLogout();
+    profiles=[];
+    renderProfiles();
+    location.reload();
+  }catch(error){
+    alert(error.message || "Sign out failed.");
+  }
+}
+
+
+</script>
+
+</body>
+</html>
